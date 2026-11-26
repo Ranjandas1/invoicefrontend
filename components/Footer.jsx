@@ -9,7 +9,7 @@ const Footer = () => {
       <div className={footerStyles.container}>
       <div className={footerStyles.copyright} >
          &copy; {new Date().getFullYear()} PromptToInvoice • Developed By
-          Riveen_Official.
+          Ranjan.
       </div>
 
       <div className={footerStyles.links}>
