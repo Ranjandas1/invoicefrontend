@@ -4,6 +4,7 @@ import React, { useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import AppShell from "@/components/AppShell";
+import { BrandLoadingScreen } from "@/components/BrandLoader";
 
 export default function AppLayout({ children }) {
   const { isSignedIn, isLoaded } = useAuth();
@@ -17,11 +18,7 @@ export default function AppLayout({ children }) {
   }, [isLoaded, isSignedIn, pathname, router]);
 
   if (!isLoaded) {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-gray-500">
-        Loading...
-      </div>
-    );
+    return <BrandLoadingScreen subtitle="Verifying your session..." />;
   }
 
   if (!isSignedIn) {

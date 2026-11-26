@@ -4,11 +4,13 @@ import React, { useCallback, useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { dashboardStyles } from "@/assets/dummyStyles";
 import { useAuth } from "@/context/AuthContext";
+import { useToast } from "@/context/ToastContext";
 import KpiCard from "@/components/KpiCard";
 import { EyeIcon, FileTextIcon } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import AiInvoiceModal from "@/components/AiInvoiceModal";
 import GeminiIcon from "@/components/GeminiIcon";
+import { DashboardSkeleton } from "@/components/BrandLoader";
 import { setNavState } from "@/lib/navState";
 import {
   API_BASE,
@@ -26,6 +28,7 @@ function capitalize(s) {
 const Dashboard = () => {
   const router = useRouter();
   const { getToken, isSignedIn } = useAuth();
+  const toast = useToast();
 
   const obtainToken = useCallback(async () => {
     if (typeof getToken !== "function") return null;
@@ -156,19 +159,33 @@ const Dashboard = () => {
   }
 
   async function handleGenerateFromAI(rawText, userData = null) {
-    const token = await obtainToken();
-    const created = await createInvoiceWithAI({
-      token,
-      prompt: rawText,
-      userData,
-    });
-    const targetId = created?.invoiceNumber || created?._id || created?.id;
-    await fetchInvoices();
-    setAiOpen(false);
-    if (targetId) {
-      setNavState(targetId, { ...created, id: targetId });
-      router.push(`/app/invoices/${encodeURIComponent(targetId)}/edit`);
+    try {
+      const token = await obtainToken();
+      const created = await createInvoiceWithAI({
+        token,
+        prompt: rawText,
+        userData,
+      });
+      const targetId = created?.invoiceNumber || created?._id || created?.id;
+      await fetchInvoices();
+      setAiOpen(false);
+      toast.success(
+        targetId
+          ? `AI invoice ${targetId} generated.`
+          : "AI invoice generated successfully."
+      );
+      if (targetId) {
+        setNavState(targetId, { ...created, id: targetId });
+        router.push(`/app/invoices/${encodeURIComponent(targetId)}/edit`);
+      }
+    } catch (err) {
+      toast.error(err?.message || "Failed to generate invoice with AI.");
+      throw err;
     }
+  }
+
+  if (loading) {
+    return <DashboardSkeleton />;
   }
 
   return (
@@ -180,16 +197,16 @@ const Dashboard = () => {
         </p>
       </div>
 
-      {loading ? (
-        <div className="p-6">Loading...</div>
-      ) : error ? (
-        <div className="p-6">
-          <div className="text-red-600 mb-3">Error: {error}</div>
+      {error ? (
+        <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4">
+          <div className="text-sm font-medium text-red-700 mb-3">
+            Error: {error}
+          </div>
           <div className="flex gap-2">
             <button
               type="button"
               onClick={fetchInvoices}
-              className="px-3 py-1 bg-blue-600 text-white rounded"
+              className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors cursor-pointer"
             >
               Retry
             </button>
@@ -197,7 +214,7 @@ const Dashboard = () => {
               <button
                 type="button"
                 onClick={() => router.push("/login")}
-                className="px-3 py-1 bg-gray-700 text-white rounded"
+                className="px-3 py-1.5 text-sm font-medium bg-gray-700 text-white rounded-lg hover:bg-gray-800 transition-colors cursor-pointer"
               >
                 Sign in
               </button>
@@ -269,7 +286,7 @@ const Dashboard = () => {
             <div className="p-6">
               <h3 className="font-semibold text-gray-900 mb-4">Quick Actions</h3>
               <div className={dashboardStyles.quickActionsContainer}>
-                <button
+                {/* <button
                   type="button"
                   onClick={() => setAiOpen(true)}
                   className={`${dashboardStyles.quickActionButton} ${dashboardStyles.quickActionBlue}`}
@@ -282,7 +299,7 @@ const Dashboard = () => {
                   <span className={dashboardStyles.quickActionText}>
                     Create with AI
                   </span>
-                </button>
+                </button> */}
 
                 <button
                   type="button"

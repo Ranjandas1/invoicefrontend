@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { invoicePreviewStyles } from "@/assets/dummyStyles";
+import { InvoicePreviewSkeleton } from "@/components/BrandLoader";
 import { getNavState, setNavState } from "@/lib/navState";
 import {
   API_BASE,
@@ -509,7 +510,7 @@ export default function InvoicePreview() {
   }, [invoice]);
 
   if (!invoice && (loadingInvoice || profileLoading)) {
-    return <div className="p-6">Loading…</div>;
+    return <InvoicePreviewSkeleton />;
   }
 
   if (!invoice) {

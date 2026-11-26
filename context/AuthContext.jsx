@@ -136,6 +136,11 @@ export function AuthProvider({ children }) {
     setToken(null);
     setUser(null);
     writeStoredToken(null);
+    try {
+      localStorage.removeItem("business_profile");
+    } catch {
+      /* ignore storage errors */
+    }
   }, []);
 
   // Accepts (and ignores) an options arg for drop-in compatibility.

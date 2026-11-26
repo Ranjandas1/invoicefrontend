@@ -3,10 +3,11 @@
 import React, { useMemo, useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import StatusBadge from "@/components/StatusBadge";
-import AiInvoiceModal from "@/components/AiInvoiceModal";
-import GeminiIcon from "@/components/GeminiIcon";
 import { invoicesStyles } from "@/assets/dummyStyles";
 import { useAuth } from "@/context/AuthContext";
+import { useToast } from "@/context/ToastContext";
+import ConfirmModal from "@/components/ConfirmModal";
+import { InvoicesSkeleton } from "@/components/BrandLoader";
 import { setNavState } from "@/lib/navState";
 import {
   API_BASE,
@@ -14,7 +15,6 @@ import {
   normalizeClient,
   currencyFmt,
   formatDate,
-  createInvoiceWithAI,
 } from "@/lib/invoiceUtils";
 
 function normalizeInvoiceFromServer(inv = {}) {
@@ -122,15 +122,19 @@ const ResetIcon = ({ className = "w-4 h-4" }) => (
 
 function Pagination({ page, totalPages, onChange }) {
   if (totalPages <= 1) return null;
+
   const pages = [];
   const start = Math.max(1, page - 2);
   const end = Math.min(totalPages, start + 4);
+
   for (let i = start; i <= end; i++) pages.push(i);
+
   return (
     <div className={invoicesStyles.pagination}>
       <div className={invoicesStyles.paginationText}>
         Page {page} of {totalPages}
       </div>
+
       <div className={invoicesStyles.paginationControls}>
         <button
           type="button"
@@ -140,6 +144,7 @@ function Pagination({ page, totalPages, onChange }) {
         >
           Previous
         </button>
+
         <div className={invoicesStyles.paginationNumbers}>
           {pages.map((p) => (
             <button
@@ -156,6 +161,7 @@ function Pagination({ page, totalPages, onChange }) {
             </button>
           ))}
         </div>
+
         <button
           type="button"
           onClick={() => onChange(Math.min(totalPages, page + 1))}
@@ -172,14 +178,18 @@ function Pagination({ page, totalPages, onChange }) {
 export default function InvoicesPage() {
   const router = useRouter();
   const { getToken, isSignedIn } = useAuth();
+  const toast = useToast();
 
   const obtainToken = useCallback(async () => {
     if (typeof getToken !== "function") return null;
+
     try {
       let token = await getToken({ template: "default" }).catch(() => null);
+
       if (!token) {
         token = await getToken({ forceRefresh: true }).catch(() => null);
       }
+
       return token;
     } catch {
       return null;
@@ -187,8 +197,10 @@ export default function InvoicesPage() {
   }, [getToken]);
 
   const [allInvoices, setAllInvoices] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -196,34 +208,48 @@ export default function InvoicesPage() {
   const [to, setTo] = useState("");
   const [perPage, setPerPage] = useState(6);
 
-  const [sortBy, setSortBy] = useState({ key: "issueDate", dir: "desc" });
-  const [page, setPage] = useState(1);
+  const [sortBy, setSortBy] = useState({
+    key: "issueDate",
+    dir: "desc",
+  });
 
-  const [aiOpen, setAiOpen] = useState(false);
+  const [page, setPage] = useState(1);
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
     setError(null);
+
     try {
       const token = await obtainToken();
-      const headers = { Accept: "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+
+      const headers = {
+        Accept: "application/json",
+      };
+
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
 
       const res = await fetch(`${API_BASE}/api/invoices`, {
         method: "GET",
         headers,
       });
+
       if (res.status === 401) {
         setError("Unauthorized. Please sign in.");
         setAllInvoices([]);
         return;
       }
+
       if (!res.ok) {
         const json = await res.json().catch(() => null);
         throw new Error(json?.message || `Failed to fetch (${res.status})`);
       }
+
       const json = await res.json().catch(() => null);
+
       const raw = Array.isArray(json?.data) ? json.data : json || [];
+
       setAllInvoices(raw.map(normalizeInvoiceFromServer));
     } catch (err) {
       console.error("fetchInvoices error:", err);
@@ -235,9 +261,11 @@ export default function InvoicesPage() {
 
   useEffect(() => {
     let cancelled = false;
+
     Promise.resolve().then(() => {
       if (!cancelled) fetchInvoices();
     });
+
     return () => {
       cancelled = true;
     };
@@ -247,13 +275,21 @@ export default function InvoicesPage() {
     let paid = 0;
     let unpaid = 0;
     let drafts = 0;
+
     for (const inv of allInvoices) {
       const s = (inv.status || "").toString().toLowerCase();
+
       if (s === "paid") paid += 1;
       else if (s === "unpaid" || s === "overdue") unpaid += 1;
       else if (s === "draft") drafts += 1;
     }
-    return { total: allInvoices.length, paid, unpaid, drafts };
+
+    return {
+      total: allInvoices.length,
+      paid,
+      unpaid,
+      drafts,
+    };
   }, [allInvoices]);
 
   const filtered = useMemo(() => {
@@ -261,23 +297,22 @@ export default function InvoicesPage() {
 
     if (search.trim()) {
       const q = search.toLowerCase();
+
       arr = arr.filter((i) => {
         const client = normalizeClient(i.client);
+
         return (
           (client.name && client.name.toLowerCase().includes(q)) ||
           (i.id && i.id.toLowerCase().includes(q)) ||
-          String(i.email || "")
-            .toLowerCase()
-            .includes(q) ||
-          String(i.company || "")
-            .toLowerCase()
-            .includes(q)
+          String(i.email || "").toLowerCase().includes(q) ||
+          String(i.company || "").toLowerCase().includes(q)
         );
       });
     }
 
     if (status !== "all") {
       const target = status.toLowerCase();
+
       arr = arr.filter(
         (i) => (i.status || "").toString().toLowerCase() === target
       );
@@ -286,15 +321,15 @@ export default function InvoicesPage() {
     if (from || to) {
       const f = from ? new Date(from).setHours(0, 0, 0, 0) : null;
       const t = to ? new Date(to).setHours(23, 59, 59, 999) : null;
+
       arr = arr.filter((i) => {
-        const d = new Date(i.issueDate || i.date || i.createdAt).setHours(
-          0,
-          0,
-          0,
-          0
-        );
+        const d = new Date(
+          i.issueDate || i.date || i.createdAt
+        ).setHours(0, 0, 0, 0);
+
         if (f !== null && d < f) return false;
         if (t !== null && d > t) return false;
+
         return true;
       });
     }
@@ -310,21 +345,26 @@ export default function InvoicesPage() {
       if (sortBy.key === "client") {
         const an = normalizeClient(ak).name.toLowerCase();
         const bn = normalizeClient(bk).name.toLowerCase();
+
         if (an < bn) return sortBy.dir === "asc" ? -1 : 1;
         if (an > bn) return sortBy.dir === "asc" ? 1 : -1;
+
         return 0;
       }
 
       const ad = Date.parse(ak || a.issueDate || a.dueDate || "");
       const bd = Date.parse(bk || b.issueDate || b.dueDate || "");
+
       if (!Number.isNaN(ad) && !Number.isNaN(bd)) {
         return sortBy.dir === "asc" ? ad - bd : bd - ad;
       }
 
       const as = (ak || "").toString().toLowerCase();
       const bs = (bk || "").toString().toLowerCase();
+
       if (as < bs) return sortBy.dir === "asc" ? -1 : 1;
       if (as > bs) return sortBy.dir === "asc" ? 1 : -1;
+
       return 0;
     });
 
@@ -339,63 +379,80 @@ export default function InvoicesPage() {
   function handleSort(key) {
     setSortBy((s) =>
       s.key === key
-        ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: "asc" }
+        ? {
+            key,
+            dir: s.dir === "asc" ? "desc" : "asc",
+          }
+        : {
+            key,
+            dir: "asc",
+          }
     );
   }
 
   function openInvoice(inv) {
     const found = allInvoices.find((x) => x && x.id === inv.id) || inv;
+
     setNavState(inv.id, found);
+
     router.push(`/app/invoices/${inv.id}/preview`);
   }
 
-  async function handleDeleteInvoice(inv) {
+  function handleDeleteInvoice(inv) {
     if (!inv?.id) return;
-    if (!confirm(`Delete invoice ${inv.id}? This cannot be undone.`)) return;
+    setDeleteTarget(inv);
+  }
+
+  async function confirmDeleteInvoice() {
+    if (!deleteTarget?.id || deleting) return;
+    setDeleting(true);
+
     try {
       const token = await obtainToken();
+
       if (!token) {
-        alert("Delete requires authentication. Please sign in.");
+        toast.error("Delete requires authentication. Please sign in.");
+        setDeleteTarget(null);
         router.push("/login");
         return;
       }
+
       const res = await fetch(
-        `${API_BASE}/api/invoices/${encodeURIComponent(inv.id)}`,
+        `${API_BASE}/api/invoices/${encodeURIComponent(deleteTarget.id)}`,
         {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
         }
       );
+
       if (res.status === 401) {
-        alert("Unauthorized. Please sign in.");
+        toast.error("Unauthorized. Please sign in.");
+        setDeleteTarget(null);
         router.push("/login");
         return;
       }
+
       if (!res.ok) {
         const json = await res.json().catch(() => null);
         throw new Error(json?.message || `Delete failed (${res.status})`);
       }
+
+      const deletedId = deleteTarget.id;
+      setDeleteTarget(null);
       await fetchInvoices();
-      alert("Invoice deleted.");
+      toast.success(`Invoice ${deletedId} deleted.`);
     } catch (err) {
       console.error("deleteInvoice error:", err);
-      alert(err?.message || "Failed to delete invoice.");
+      toast.error(err?.message || "Failed to delete invoice.");
+    } finally {
+      setDeleting(false);
     }
   }
 
-  async function handleGenerateFromAI(rawText, userData = null) {
-    const token = await obtainToken();
-    const created = await createInvoiceWithAI({
-      token,
-      prompt: rawText,
-      userData,
-    });
-    const saved = normalizeInvoiceFromServer(created);
-    await fetchInvoices();
-    setAiOpen(false);
-    setNavState(saved.id, saved);
-    router.push(`/app/invoices/${encodeURIComponent(saved.id)}/edit`);
+  if (loading && allInvoices.length === 0) {
+    return <InvoicesSkeleton />;
   }
 
   const getClientInitial = (client) => {
@@ -409,20 +466,11 @@ export default function InvoicesPage() {
         <div>
           <h1 className={invoicesStyles.headerTitle}>Invoice Management</h1>
           <p className={invoicesStyles.headerSubtitle}>
-            Search, filter, and manage your invoices with powerful AI tools
+            Search, filter, and manage your invoices
           </p>
         </div>
 
         <div className={invoicesStyles.headerActions}>
-          <button
-            type="button"
-            onClick={() => setAiOpen(true)}
-            className={invoicesStyles.aiButton}
-          >
-            <GeminiIcon className="w-6 h-6 group-hover:scale-110 transition-transform flex-none" />
-            Create with AI
-          </button>
-
           <button
             type="button"
             onClick={() => router.push("/app/create-invoice")}
@@ -452,6 +500,7 @@ export default function InvoicesPage() {
             }}
           >
             <div>{error}</div>
+
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
@@ -464,6 +513,7 @@ export default function InvoicesPage() {
               >
                 Retry
               </button>
+
               {String(error).toLowerCase().includes("unauthorized") && (
                 <button
                   type="button"
@@ -488,14 +538,17 @@ export default function InvoicesPage() {
           <div className={invoicesStyles.statValue}>{stats.total}</div>
           <div className={invoicesStyles.statLabel}>Total Invoices</div>
         </div>
+
         <div className={invoicesStyles.statCard}>
           <div className={invoicesStyles.statValue}>{stats.paid}</div>
           <div className={invoicesStyles.statLabel}>Paid</div>
         </div>
+
         <div className={invoicesStyles.statCard}>
           <div className={invoicesStyles.statValue}>{stats.unpaid}</div>
           <div className={invoicesStyles.statLabel}>Unpaid</div>
         </div>
+
         <div className={invoicesStyles.statCard}>
           <div className={invoicesStyles.statValue}>{stats.drafts}</div>
           <div className={invoicesStyles.statLabel}>Drafts</div>
@@ -508,8 +561,10 @@ export default function InvoicesPage() {
             <div className={invoicesStyles.filtersIconContainer}>
               <FilterIcon className="w-5 h-5" />
             </div>
+
             <h2 className={invoicesStyles.filtersTitle}>Filters & Search</h2>
           </div>
+
           <div className={invoicesStyles.filtersCount}>
             Showing{" "}
             <span className={invoicesStyles.filtersCountNumber}>
@@ -527,10 +582,12 @@ export default function InvoicesPage() {
             >
               Search Invoices
             </label>
+
             <div className={invoicesStyles.searchInputContainer}>
               <div className={invoicesStyles.searchIcon}>
                 <SearchIcon className="w-5 h-5 text-gray-400" />
               </div>
+
               <input
                 id="invoice-search"
                 name="search"
@@ -553,6 +610,7 @@ export default function InvoicesPage() {
             >
               Status
             </label>
+
             <select
               id="status-filter"
               value={status}
@@ -572,6 +630,7 @@ export default function InvoicesPage() {
 
           <div className={invoicesStyles.dateRangeContainer}>
             <label className={invoicesStyles.filterLabel}>Date Range</label>
+
             <div className={invoicesStyles.dateRangeFlex}>
               <input
                 id="from-date"
@@ -585,9 +644,11 @@ export default function InvoicesPage() {
                 className={invoicesStyles.dateInput}
                 aria-label="Start date"
               />
+
               <div className={invoicesStyles.dateSeparator}>
                 <span className={invoicesStyles.dateSeparatorText}>to</span>
               </div>
+
               <input
                 id="to-date"
                 name="to"
@@ -609,6 +670,7 @@ export default function InvoicesPage() {
             <label htmlFor="per-page" className={invoicesStyles.perPageLabel}>
               Show
             </label>
+
             <select
               id="per-page"
               value={perPage}
@@ -638,6 +700,7 @@ export default function InvoicesPage() {
             >
               <ResetIcon className="w-4 h-4" /> Reset Filters
             </button>
+
             <button
               type="button"
               onClick={() => fetchInvoices()}
@@ -654,6 +717,7 @@ export default function InvoicesPage() {
           <div className={invoicesStyles.tableHeaderContent}>
             <div>
               <h3 className={invoicesStyles.tableTitle}>All Invoices</h3>
+
               <p className={invoicesStyles.tableSubtitle}>
                 Sorted by{" "}
                 <span className={invoicesStyles.tableSubtitleBold}>
@@ -683,6 +747,7 @@ export default function InvoicesPage() {
                     />
                   </div>
                 </th>
+
                 <th
                   onClick={() => handleSort("amount")}
                   className={invoicesStyles.tableHeaderCell}
@@ -694,6 +759,7 @@ export default function InvoicesPage() {
                     />
                   </div>
                 </th>
+
                 <th
                   onClick={() => handleSort("status")}
                   className={invoicesStyles.tableHeaderCell}
@@ -705,6 +771,7 @@ export default function InvoicesPage() {
                     />
                   </div>
                 </th>
+
                 <th
                   onClick={() => handleSort("dueDate")}
                   className={invoicesStyles.tableHeaderCell}
@@ -716,13 +783,18 @@ export default function InvoicesPage() {
                     />
                   </div>
                 </th>
-                <th className={invoicesStyles.tableHeaderCellRight}>Actions</th>
+
+                <th className={invoicesStyles.tableHeaderCellRight}>
+                  Actions
+                </th>
               </tr>
             </thead>
+
             <tbody className={invoicesStyles.tableBody}>
               {pageData.map((inv) => {
                 const client = normalizeClient(inv.client);
                 const clientInitial = getClientInitial(inv.client);
+
                 return (
                   <tr key={inv.id} className={invoicesStyles.tableRow}>
                     <td className={invoicesStyles.clientCell}>
@@ -730,22 +802,27 @@ export default function InvoicesPage() {
                         <div className={invoicesStyles.clientAvatar}>
                           {clientInitial}
                         </div>
+
                         <div>
                           <div className={invoicesStyles.clientInfo}>
                             {client.name || inv.company || inv.id}
                           </div>
+
                           <div className={invoicesStyles.clientId}>
                             {inv.id}
                           </div>
+
                           <div className={invoicesStyles.clientEmail}>
                             {client.email || inv.email}
                           </div>
                         </div>
                       </div>
                     </td>
+
                     <td className={invoicesStyles.amountCell}>
                       {currencyFmt(inv.amount || 0, inv.currency)}
                     </td>
+
                     <td className={invoicesStyles.statusCell}>
                       <StatusBadge
                         status={inv.status}
@@ -753,9 +830,11 @@ export default function InvoicesPage() {
                         showIcon
                       />
                     </td>
+
                     <td className={invoicesStyles.dateCell}>
                       {inv.dueDate ? formatDate(inv.dueDate) : "—"}
                     </td>
+
                     <td className={invoicesStyles.actionsCell}>
                       <div className={invoicesStyles.actionsContainer}>
                         <button
@@ -763,7 +842,8 @@ export default function InvoicesPage() {
                           onClick={() => openInvoice(inv)}
                           className={invoicesStyles.viewButton}
                         >
-                          <EyeIcon className={invoicesStyles.buttonIcon} /> View
+                          <EyeIcon className={invoicesStyles.buttonIcon} />
+                          View
                         </button>
 
                         <button
@@ -784,6 +864,7 @@ export default function InvoicesPage() {
                   </tr>
                 );
               })}
+
               {pageData.length === 0 && !loading && (
                 <tr>
                   <td colSpan="5" className={invoicesStyles.emptyState}>
@@ -791,13 +872,16 @@ export default function InvoicesPage() {
                       <div className={invoicesStyles.emptyStateIconContainer}>
                         <SearchIcon className={invoicesStyles.emptyStateIcon} />
                       </div>
+
                       <div className={invoicesStyles.emptyStateTitle}>
                         No invoices found
                       </div>
+
                       <p className={invoicesStyles.emptyStateMessage}>
                         Try adjusting your search filters or create a new
                         invoice to get started.
                       </p>
+
                       <button
                         type="button"
                         onClick={() => router.push("/app/create-invoice")}
@@ -809,6 +893,7 @@ export default function InvoicesPage() {
                   </td>
                 </tr>
               )}
+
               {loading && (
                 <tr>
                   <td colSpan="5" style={{ padding: 40, textAlign: "center" }}>
@@ -831,11 +916,21 @@ export default function InvoicesPage() {
         )}
       </div>
 
-      <AiInvoiceModal
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
-        onGenerate={handleGenerateFromAI}
-        initialText=""
+      <ConfirmModal
+        open={Boolean(deleteTarget)}
+        title="Delete Invoice"
+        description={
+          deleteTarget
+            ? `Are you sure you want to delete invoice "${deleteTarget.id}"? This action cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete Invoice"
+        cancelLabel="Cancel"
+        loading={deleting}
+        onConfirm={confirmDeleteInvoice}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
       />
     </div>
   );

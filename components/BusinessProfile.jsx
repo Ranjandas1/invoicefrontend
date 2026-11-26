@@ -7,11 +7,18 @@ import {
   customStyles,
 } from "@/assets/dummyStyles";
 import { useAuth } from "@/context/AuthContext";
+import { useToast } from "@/context/ToastContext";
+import ConfirmModal from "@/components/ConfirmModal";
+import { BusinessProfileSkeleton } from "@/components/BrandLoader";
 import {
   ImageIcon,
   SaveIcon,
   Trash2 as DeleteIcon,
   RotateCcw as ResetIcon,
+  Building2,
+  Plus,
+  CheckCircle2,
+  Loader2,
 } from "lucide-react";
 import { API_BASE, resolveImageUrl } from "@/lib/invoiceUtils";
 
@@ -29,6 +36,7 @@ const DEFAULT_META = {
   defaultTaxPercent: 0, // US sales tax varies by state
   notes: "",
   profileId: null,
+  isDefault: false,
 };
 
 const UploadIcon = ({ className = "w-5 h-5" }) => (
@@ -45,11 +53,51 @@ const UploadIcon = ({ className = "w-5 h-5" }) => (
   </svg>
 );
 
+function mapServerProfileToMeta(data) {
+  if (!data) return { ...DEFAULT_META };
+  return {
+    businessName: data.businessName ?? "",
+    email: data.email ?? "",
+    address: data.address ?? "",
+    phone: data.phone ?? "",
+    taxId: data.taxId ?? data.gst ?? "",
+    logoUrl: resolveImageUrl(data.logoUrl),
+    stampUrl: resolveImageUrl(data.stampUrl),
+    signatureUrl: resolveImageUrl(data.signatureUrl),
+    signatureOwnerName: data.signatureOwnerName ?? "",
+    signatureOwnerTitle: data.signatureOwnerTitle ?? "",
+    defaultTaxPercent: data.defaultTaxPercent ?? 0,
+    notes: data.notes ?? "",
+    profileId: data._id ?? null,
+    isDefault: Boolean(data.isDefault),
+  };
+}
+
+function syncActiveProfileCache(list) {
+  try {
+    const active = list.find((p) => p.isDefault) || list[0] || null;
+    if (active) {
+      localStorage.setItem("business_profile", JSON.stringify(active));
+    } else {
+      localStorage.removeItem("business_profile");
+    }
+    window.dispatchEvent(new Event("business-profile-updated"));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 const BusinessProfile = () => {
   const { getToken, isSignedIn, isLoaded } = useAuth();
+  const toast = useToast();
 
+  const [profiles, setProfiles] = useState([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(true);
   const [meta, setMeta] = useState(DEFAULT_META);
   const [saving, setSaving] = useState(false);
+  const [switchingId, setSwitchingId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [files, setFiles] = useState({
     logo: null,
@@ -68,13 +116,17 @@ const BusinessProfile = () => {
     previewsRef.current = previews;
   }, [previews]);
 
+  const revokeBlobPreviews = useCallback((currentPreviews) => {
+    Object.values(currentPreviews || {}).forEach((src) => {
+      if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
+    });
+  }, []);
+
   useEffect(() => {
     return () => {
-      Object.values(previewsRef.current).forEach((src) => {
-        if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
-      });
+      revokeBlobPreviews(previewsRef.current);
     };
-  }, []);
+  }, [revokeBlobPreviews]);
 
   const getAuthToken = useCallback(async () => {
     if (!isLoaded || !isSignedIn || typeof getToken !== "function") return null;
@@ -88,61 +140,84 @@ const BusinessProfile = () => {
     }
   }, [getToken, isLoaded, isSignedIn]);
 
-  useEffect(() => {
-    let mounted = true;
+  const applyProfileToForm = useCallback(
+    (profileData) => {
+      revokeBlobPreviews(previewsRef.current);
+      const nextMeta = mapServerProfileToMeta(profileData);
+      setMeta(nextMeta);
+      setFiles({ logo: null, stamp: null, signature: null });
+      setPreviews({
+        logo: nextMeta.logoUrl,
+        stamp: nextMeta.stampUrl,
+        signature: nextMeta.signatureUrl,
+      });
+    },
+    [revokeBlobPreviews]
+  );
 
-    async function fetchProfile() {
-      if (!isLoaded || !isSignedIn) return;
+  const fetchProfiles = useCallback(
+    async (preferredId = null) => {
+      if (!isLoaded) return;
+      if (!isSignedIn) {
+        setProfiles([]);
+        setLoadingProfiles(false);
+        return;
+      }
 
       const token = await getAuthToken();
-      if (!token) return;
+      if (!token) {
+        setLoadingProfiles(false);
+        return;
+      }
 
       try {
-        const res = await fetch(`${API_BASE}/api/businessProfile/me`, {
+        const res = await fetch(`${API_BASE}/api/businessProfile`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         });
 
-        if (!res.ok || res.status === 204) return;
+        if (!res.ok) {
+          throw new Error("Failed to load business profiles");
+        }
 
         const json = await res.json().catch(() => null);
-        const data = json?.data;
-        if (!data || !mounted) return;
+        const list = Array.isArray(json?.data) ? json.data : [];
+        setProfiles(list);
+        syncActiveProfileCache(list);
 
-        const serverMeta = {
-          businessName: data.businessName ?? "",
-          email: data.email ?? "",
-          address: data.address ?? "",
-          phone: data.phone ?? "",
-          taxId: data.taxId ?? data.gst ?? "",
-          logoUrl: resolveImageUrl(data.logoUrl),
-          stampUrl: resolveImageUrl(data.stampUrl),
-          signatureUrl: resolveImageUrl(data.signatureUrl),
-          signatureOwnerName: data.signatureOwnerName ?? "",
-          signatureOwnerTitle: data.signatureOwnerTitle ?? "",
-          defaultTaxPercent: data.defaultTaxPercent ?? 0,
-          notes: data.notes ?? "",
-          profileId: data._id ?? null,
-        };
-
-        setMeta(serverMeta);
-        setPreviews({
-          logo: serverMeta.logoUrl,
-          stamp: serverMeta.stampUrl,
-          signature: serverMeta.signatureUrl,
-        });
+        if (list.length > 0) {
+          const target =
+            (preferredId && list.find((p) => p._id === preferredId)) ||
+            list.find((p) => p.isDefault) ||
+            list[0];
+          applyProfileToForm(target);
+        } else {
+          applyProfileToForm(null);
+        }
       } catch (err) {
-        console.error("fetchProfile error:", err);
+        console.error("fetchProfiles error:", err);
+        toast.error(err?.message || "Could not load business profiles.");
+      } finally {
+        setLoadingProfiles(false);
       }
-    }
+    },
+    [applyProfileToForm, getAuthToken, isLoaded, isSignedIn, toast]
+  );
 
-    fetchProfile();
+  useEffect(() => {
+    let cancelled = false;
+
+    Promise.resolve().then(() => {
+      if (!cancelled) {
+        fetchProfiles();
+      }
+    });
 
     return () => {
-      mounted = false;
+      cancelled = true;
     };
-  }, [getAuthToken, isLoaded, isSignedIn]);
+  }, [fetchProfiles]);
 
   function updateMeta(field, value) {
     setMeta((prev) => ({ ...prev, [field]: value }));
@@ -180,15 +255,106 @@ const BusinessProfile = () => {
     );
   }
 
+  function handleSelectProfile(profile) {
+    applyProfileToForm(profile);
+  }
+
+  function handleNewProfile() {
+    applyProfileToForm(null);
+    toast.info("Enter details below to create a new business profile.");
+  }
+
+  async function handleSetActiveProfile(profileId) {
+    if (!profileId || switchingId) return;
+    setSwitchingId(profileId);
+
+    try {
+      const token = await getAuthToken();
+      if (!token) {
+        toast.error("Sign in required to switch profiles.");
+        return;
+      }
+
+      const res = await fetch(
+        `${API_BASE}/api/businessProfile/${profileId}/active`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(json?.message || "Failed to switch active profile");
+      }
+
+      await fetchProfiles(profileId);
+      toast.success(
+        `${json?.data?.businessName || "Profile"} is now your active business profile.`
+      );
+    } catch (err) {
+      console.error("handleSetActiveProfile error:", err);
+      toast.error(err?.message || "Failed to activate profile.");
+    } finally {
+      setSwitchingId(null);
+    }
+  }
+
+  async function handleConfirmDeleteProfile() {
+    if (!deleteTarget?._id || deleting) return;
+    setDeleting(true);
+
+    try {
+      const token = await getAuthToken();
+      if (!token) {
+        toast.error("Sign in required to delete profiles.");
+        return;
+      }
+
+      const res = await fetch(
+        `${API_BASE}/api/businessProfile/${deleteTarget._id}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(json?.message || "Failed to delete profile");
+      }
+
+      const deletedName = deleteTarget.businessName || "Business profile";
+      setDeleteTarget(null);
+      await fetchProfiles();
+      toast.success(`${deletedName} deleted.`);
+    } catch (err) {
+      console.error("handleConfirmDeleteProfile error:", err);
+      toast.error(err?.message || "Failed to delete business profile.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   async function handleSave(e) {
     e?.preventDefault();
     if (saving) return;
+
+    if (!String(meta.businessName || "").trim()) {
+      toast.error("Business name is required.");
+      return;
+    }
+
     setSaving(true);
 
     try {
       const token = await getAuthToken();
       if (!token) {
-        alert("Login required");
+        toast.error("Please sign in to save your business profile.");
         return;
       }
 
@@ -225,11 +391,12 @@ const BusinessProfile = () => {
         }
       }
 
-      const url = meta.profileId
+      const isUpdate = Boolean(meta.profileId);
+      const url = isUpdate
         ? `${API_BASE}/api/businessProfile/${meta.profileId}`
         : `${API_BASE}/api/businessProfile`;
 
-      const method = meta.profileId ? "PUT" : "POST";
+      const method = isUpdate ? "PUT" : "POST";
 
       const res = await fetch(url, {
         method,
@@ -239,116 +406,233 @@ const BusinessProfile = () => {
         body: fd,
       });
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || "Save failed");
-      }
-
       const json = await res.json().catch(() => null);
-      const saved = json?.data;
-
-      if (saved) {
-        Object.values(previews).forEach((src) => {
-          if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
-        });
-
-        const updatedMeta = {
-          businessName: saved.businessName ?? meta.businessName,
-          email: saved.email ?? meta.email,
-          address: saved.address ?? meta.address,
-          phone: saved.phone ?? meta.phone,
-          taxId: saved.taxId ?? saved.gst ?? meta.taxId,
-          logoUrl: resolveImageUrl(saved.logoUrl),
-          stampUrl: resolveImageUrl(saved.stampUrl),
-          signatureUrl: resolveImageUrl(saved.signatureUrl),
-          signatureOwnerName:
-            saved.signatureOwnerName ?? meta.signatureOwnerName,
-          signatureOwnerTitle:
-            saved.signatureOwnerTitle ?? meta.signatureOwnerTitle,
-          defaultTaxPercent: saved.defaultTaxPercent ?? meta.defaultTaxPercent,
-          notes: saved.notes ?? meta.notes,
-          profileId: saved._id ?? meta.profileId,
-        };
-
-        setMeta(updatedMeta);
-        setFiles({ logo: null, stamp: null, signature: null });
-        setPreviews({
-          logo: updatedMeta.logoUrl,
-          stamp: updatedMeta.stampUrl,
-          signature: updatedMeta.signatureUrl,
-        });
+      if (!res.ok) {
+        throw new Error(json?.message || "Save failed");
       }
 
-      alert("Saved successfully");
+      const saved = json?.data;
+      await fetchProfiles(saved?._id || meta.profileId);
+      toast.success(
+        isUpdate
+          ? "Business profile updated."
+          : "Business profile created."
+      );
     } catch (err) {
       console.error("handleSave error:", err);
-      alert(err?.message || "Error saving profile");
+      toast.error(err?.message || "Error saving profile.");
     } finally {
       setSaving(false);
     }
   }
 
   function handleClearProfile() {
-    Object.values(previews).forEach((src) => {
-      if (src?.startsWith("blob:")) {
-        URL.revokeObjectURL(src);
-      }
-    });
-
-    setMeta((prev) => ({ ...DEFAULT_META, profileId: prev.profileId }));
+    revokeBlobPreviews(previews);
+    setMeta((prev) => ({
+      ...DEFAULT_META,
+      profileId: prev.profileId,
+      isDefault: prev.isDefault,
+    }));
     setFiles({ logo: null, stamp: null, signature: null });
     setPreviews({ logo: null, stamp: null, signature: null });
+    toast.info("Form fields cleared. Save to apply changes.");
+  }
+
+  if (loadingProfiles) {
+    return <BusinessProfileSkeleton />;
   }
 
   return (
     <div className={businessProfileStyles.pageContainer}>
       <div className={businessProfileStyles.headerContainer}>
-        <h1 className={businessProfileStyles.headerTitle}>Business Profile</h1>
-        <p className={businessProfileStyles.headerSubtitle}>
-          Configure your company details, branding assets and invoice defaults
-        </p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className={businessProfileStyles.headerTitle}>
+              Business Profiles
+            </h1>
+            <p className={businessProfileStyles.headerSubtitle}>
+              Manage multiple company profiles, switch your active profile, and
+              customize branding assets
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleNewProfile}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-sm font-semibold shadow-sm hover:from-blue-700 hover:to-indigo-700 transition-all cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            New Profile
+          </button>
+        </div>
 
         {!isSignedIn && (
-          <div
-            style={{
-              marginTop: 12,
-              color: "#92400e",
-              background: "#fff7ed",
-              padding: 10,
-              borderRadius: 8,
-            }}
-          >
-            You are not signed in. Please sign in to load and save your business
-            profile.
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            You are not signed in. Please sign in to load and save your
+            business profiles.
           </div>
         )}
       </div>
 
-      <form onSubmit={handleSave} className={businessProfileStyles.pageContainer}>
-        <div className={businessProfileStyles.cardContainer}>
-          <div className={businessProfileStyles.cardHeaderContainer}>
+      {/* Profile Switcher Section */}
+      <div className={businessProfileStyles.cardContainer}>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div className="flex items-center gap-3">
             <div
               className={`${businessProfileStyles.cardIconContainer} ${iconColors.business}`}
             >
-              <svg
-                className="w-5 h-5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M19 21V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 8v-4m0 4h4" />
-              </svg>
+              <Building2 className="w-5 h-5" />
             </div>
-            <h2 className={businessProfileStyles.cardTitle}>
-              Business Information
-            </h2>
+            <div>
+              <h2 className={businessProfileStyles.cardTitle}>
+                Available Profiles ({profiles.length})
+              </h2>
+              <p className="text-xs text-slate-500">
+                The active profile is automatically used as the default sender
+                when creating invoices.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {profiles.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-6 text-center">
+            <p className="text-sm font-medium text-slate-700">
+              No business profiles saved yet
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              Fill out the form below to create your first business profile.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {profiles.map((profile) => {
+              const isSelected = meta.profileId === profile._id;
+              const isActive = Boolean(profile.isDefault);
+              const logoSrc = resolveImageUrl(profile.logoUrl);
+
+              return (
+                <div
+                  key={profile._id}
+                  onClick={() => handleSelectProfile(profile)}
+                  className={`group relative rounded-xl border p-4 transition-all cursor-pointer ${
+                    isSelected
+                      ? "border-blue-500 bg-blue-50/40 ring-2 ring-blue-100"
+                      : "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm"
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="w-11 h-11 rounded-lg border border-slate-200 bg-white flex items-center justify-center shrink-0 overflow-hidden">
+                      {logoSrc ? (
+                        <img
+                          src={logoSrc}
+                          alt={profile.businessName}
+                          className="w-full h-full object-contain p-1"
+                        />
+                      ) : (
+                        <Building2 className="w-5 h-5 text-slate-400" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-sm font-semibold text-slate-900 truncate">
+                          {profile.businessName}
+                        </h3>
+                        {isActive && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                            <CheckCircle2 className="w-3 h-3" />
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500 truncate mt-0.5">
+                        {profile.email || profile.phone || profile.taxId || "No contact info"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div
+                    className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center gap-2">
+                      {!isActive ? (
+                        <button
+                          type="button"
+                          onClick={() => handleSetActiveProfile(profile._id)}
+                          disabled={switchingId === profile._id}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-60 transition-colors cursor-pointer"
+                        >
+                          {switchingId === profile._id && (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          )}
+                          Set Active
+                        </button>
+                      ) : (
+                        <span className="text-xs font-medium text-emerald-700">
+                          Default for invoices
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectProfile(profile)}
+                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                      >
+                        {isSelected ? "Editing" : "Edit"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleteTarget(profile)}
+                        className="inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 p-1.5 text-red-600 hover:bg-red-100 transition-colors cursor-pointer"
+                        title={`Delete ${profile.businessName}`}
+                      >
+                        <DeleteIcon className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Profile Editor Form */}
+      <form onSubmit={handleSave} className="space-y-6">
+        <div className={businessProfileStyles.cardContainer}>
+          <div className="flex items-center justify-between gap-3 mb-6">
+            <div className={businessProfileStyles.cardHeaderContainer + " !mb-0"}>
+              <div
+                className={`${businessProfileStyles.cardIconContainer} ${iconColors.business}`}
+              >
+                <Building2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className={businessProfileStyles.cardTitle}>
+                  {meta.profileId
+                    ? "Edit Business Information"
+                    : "Create New Business Profile"}
+                </h2>
+              </div>
+            </div>
+            {meta.profileId && (
+              <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                Editing existing profile
+              </span>
+            )}
           </div>
 
           <div className={businessProfileStyles.gridCols2}>
             <div>
-              <label className={businessProfileStyles.label}>Business Name</label>
+              <label className={businessProfileStyles.label}>
+                Business Name *
+              </label>
               <input
+                required
                 className={businessProfileStyles.input}
                 value={meta.businessName}
                 onChange={(e) => updateMeta("businessName", e.target.value)}
@@ -367,7 +651,9 @@ const BusinessProfile = () => {
             </div>
 
             <div>
-              <label className={businessProfileStyles.gridColSpan2}>Address</label>
+              <label className={businessProfileStyles.gridColSpan2}>
+                Address
+              </label>
               <textarea
                 rows={3}
                 className={businessProfileStyles.textarea}
@@ -383,7 +669,7 @@ const BusinessProfile = () => {
                 className={businessProfileStyles.input}
                 value={meta.phone}
                 onChange={(e) => updateMeta("phone", e.target.value)}
-                placeholder="+17122235638"
+                placeholder="+1 555 010 2030"
               />
             </div>
 
@@ -617,7 +903,9 @@ const BusinessProfile = () => {
                         <p className={businessProfileStyles.uploadTextTitle}>
                           Upload Stamp
                         </p>
-                        <p className={businessProfileStyles.uploadTextSubtitle}>
+                        <p
+                          className={businessProfileStyles.uploadTextSubtitle}
+                        >
                           PNG with transparent background
                         </p>
                       </div>
@@ -708,7 +996,9 @@ const BusinessProfile = () => {
                         <p className={businessProfileStyles.uploadTextTitle}>
                           Upload Signature
                         </p>
-                        <p className={businessProfileStyles.uploadTextSubtitle}>
+                        <p
+                          className={businessProfileStyles.uploadTextSubtitle}
+                        >
                           PNG with transparent background
                         </p>
                       </div>
@@ -766,8 +1056,16 @@ const BusinessProfile = () => {
                 disabled={saving}
                 className={businessProfileStyles.saveButton}
               >
-                <SaveIcon className="w-4 h-4" />{" "}
-                {saving ? "Saving..." : "Save Profile"}
+                {saving ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <SaveIcon className="w-4 h-4" />
+                )}
+                {saving
+                  ? "Saving..."
+                  : meta.profileId
+                  ? "Update Profile"
+                  : "Create Profile"}
               </button>
 
               <button
@@ -775,12 +1073,29 @@ const BusinessProfile = () => {
                 onClick={handleClearProfile}
                 className={businessProfileStyles.resetButton}
               >
-                <ResetIcon className="w-4 h-4" /> Clear Profile
+                <ResetIcon className="w-4 h-4" /> Clear Fields
               </button>
             </div>
           </div>
         </div>
       </form>
+
+      <ConfirmModal
+        open={Boolean(deleteTarget)}
+        title="Delete Business Profile"
+        description={
+          deleteTarget
+            ? `Are you sure you want to delete "${deleteTarget.businessName}"? Existing invoices will keep their saved sender details, but this profile will no longer appear in your profile switcher.`
+            : ""
+        }
+        confirmLabel="Delete Profile"
+        cancelLabel="Cancel"
+        loading={deleting}
+        onConfirm={handleConfirmDeleteProfile}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 };

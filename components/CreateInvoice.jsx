@@ -2,10 +2,12 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
+import { Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { useToast } from "@/context/ToastContext";
 import StatusBadge from "@/components/StatusBadge";
-import AiInvoiceModal from "@/components/AiInvoiceModal";
 import GeminiIcon from "@/components/GeminiIcon";
+import { InvoicePreviewSkeleton } from "@/components/BrandLoader";
 import { getNavState, setNavState } from "@/lib/navState";
 import {
   createInvoiceStyles,
@@ -45,23 +47,20 @@ function uid() {
   return Math.random().toString(36).slice(2, 9);
 }
 function normalizeInvoiceItems(rawItems) {
-  const items = Array.isArray(rawItems)
-    ? rawItems
-        .filter((item) => item && typeof item === "object")
-        .map((item) => ({
-          id: item.id || item._id || uid(),
-          description:
-            [item.description, item.name, item.itemName, item.title].find(
-              (value) => typeof value === "string" && value.trim(),
-            ) ?? "",
-          qty: item.qty ?? item.quantity ?? 1,
-          unitPrice: item.unitPrice ?? item.price ?? item.rate ?? 0,
-        }))
-    : [];
+  if (!Array.isArray(rawItems)) return [];
 
-  return items.length
-    ? items
-    : [{ id: uid(), description: "Service / Item", qty: 1, unitPrice: 0 }];
+  return rawItems
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      id: item.id || item._id || uid(),
+      description:
+        [item.description, item.name, item.itemName, item.title].find(
+          (value) => typeof value === "string" && value.trim(),
+        ) ?? "",
+      // Preserve the saved quantity. Do not silently replace missing values with 1.
+      qty: item.qty ?? item.quantity ?? "",
+      unitPrice: item.unitPrice ?? item.price ?? item.rate ?? "",
+    }));
 }
 
 /* ---------- icons ---------- (kept same as before) */
@@ -139,7 +138,7 @@ function buildDefaultInvoice() {
     fromPhone: "",
     fromTaxId: "", // EIN for US, VAT for Europe
     client: { name: "", email: "", address: "", phone: "" },
-    items: [{ id: uid(), description: "", qty: 1, unitPrice: "" }],
+    items: [],
     currency: "USD",
     status: "draft",
     templateStyle: "default",
@@ -195,6 +194,7 @@ export default function CreateInvoice() {
 
   // Auth hooks
   const { getToken, isSignedIn } = useAuth();
+  const toast = useToast();
 
   // helper to obtain token with a retry
   const obtainToken = useCallback(async () => {
@@ -211,13 +211,19 @@ export default function CreateInvoice() {
   }, [getToken]);
 
   const [invoice, setInvoice] = useState(() => buildDefaultInvoice());
+  const [businessProfiles, setBusinessProfiles] = useState([]);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
   const [businessProfile, setBusinessProfile] = useState(null);
   const businessProfileRef = useRef(null);
+  const itemFocusSnapshotRef = useRef({});
+  const isSubmittingRef = useRef(false);
   const items = invoice?.items || [];
   const [loading, setLoading] = useState(false);
+  const [loadingInvoice, setLoadingInvoice] = useState(
+    Boolean(isEditing && !invoiceFromState)
+  );
   const [aiEnhancing, setAiEnhancing] = useState(false);
   const [aiEnhanceError, setAiEnhanceError] = useState("");
-  const [aiOpen, setAiOpen] = useState(false);
 
   // profile fetched from server
 
@@ -239,20 +245,44 @@ export default function CreateInvoice() {
       return { ...inv, items: nextItems };
     });
   }
-  function addItem() {
-    const it = { id: uid(), description: "", qty: 1, unitPrice: '' };
-    setInvoice((inv) => {
-      if (!inv) return inv;
-      return { ...inv, items: [...(inv.items || []), it] };
-    });
+  function handleItemFocus(idx, key, value) {
+    itemFocusSnapshotRef.current[`${idx}:${key}`] = String(value ?? "");
   }
-  function removeItem(idx) {
-    const emptyItem = { id: uid(), description: "", qty: 1, unitPrice: '' };
+  function handleItemBlur(idx, key, value) {
+    const snapKey = `${idx}:${key}`;
+    const prev = itemFocusSnapshotRef.current[snapKey];
+    const next = String(value ?? "");
+    if (prev !== undefined && prev !== next) {
+      itemFocusSnapshotRef.current[snapKey] = next;
+      toast.info("Invoice item updated.");
+    }
+  }
+  function addItem() {
+    const newItem = {
+      id: uid(),
+      description: "",
+      qty: "",
+      unitPrice: "",
+    };
+
     setInvoice((inv) => {
       if (!inv) return inv;
-      const next = (inv.items || []).filter((_, i) => i !== idx);
-      return { ...inv, items: next.length ? next : [emptyItem] };
+      return { ...inv, items: [...(inv.items || []), newItem] };
     });
+
+    toast.success("Invoice item added.");
+  }
+
+  function removeItem(idx) {
+    setInvoice((inv) => {
+      if (!inv) return inv;
+      return {
+        ...inv,
+        items: (inv.items || []).filter((_, i) => i !== idx),
+      };
+    });
+
+    toast.info("Invoice item removed.");
   }
 
   /* status & currency handlers */
@@ -352,7 +382,7 @@ export default function CreateInvoice() {
     [checkInvoiceExists],
   );
 
-  /* ---------- fetch business profile as soon as page loads (when signed in) ---------- */
+  /* ---------- fetch business profiles as soon as page loads (when signed in) ---------- */
   useEffect(() => {
     let mounted = true;
 
@@ -361,37 +391,44 @@ export default function CreateInvoice() {
       try {
         const token = await obtainToken();
         if (!token) return;
-        const res = await fetch(`${API_BASE}/api/businessProfile/me`, {
+        const res = await fetch(`${API_BASE}/api/businessProfile`, {
           method: "GET",
           headers: {
             Authorization: `Bearer ${token}`,
             Accept: "application/json",
           },
         });
-        if (!res.ok || res.status === 204) {
+        if (!res.ok) {
           return;
         }
         const json = await res.json().catch(() => null);
-        const data = json?.data ?? null;
-        if (!data || !mounted) return;
+        const list = Array.isArray(json?.data) ? json.data : [];
+        if (!list.length || !mounted) return;
 
-        const serverProfile = {
+        const normalizedList = list.map((data) => ({
+          _id: data._id ?? "",
           businessName: data.businessName ?? "",
           email: data.email ?? "",
           address: data.address ?? "",
           phone: data.phone ?? "",
-          taxId: data.taxId ?? data.gst ?? "", // Support legacy GST field
+          taxId: data.taxId ?? data.gst ?? "",
           defaultTaxPercent: data.defaultTaxPercent ?? 0,
           signatureOwnerName: data.signatureOwnerName ?? "",
           signatureOwnerTitle: data.signatureOwnerTitle ?? "",
           logoUrl: data.logoUrl ?? null,
           stampUrl: data.stampUrl ?? null,
           signatureUrl: data.signatureUrl ?? null,
-        };
+          isDefault: Boolean(data.isDefault),
+        }));
 
-        businessProfileRef.current = serverProfile;
-        setBusinessProfile(serverProfile);
-        setInvoice((prev) => mergeProfileDefaults(prev, serverProfile));
+        const activeProfile =
+          normalizedList.find((p) => p.isDefault) || normalizedList[0];
+
+        setBusinessProfiles(normalizedList);
+        setSelectedProfileId(activeProfile?._id || "");
+        businessProfileRef.current = activeProfile;
+        setBusinessProfile(activeProfile);
+        setInvoice((prev) => mergeProfileDefaults(prev, activeProfile));
       } catch (err) {
         console.warn("Failed to fetch business profile:", err);
       }
@@ -427,13 +464,13 @@ export default function CreateInvoice() {
           ) || null;
 
         setInvoice(mergeProfileDefaults(base, businessProfileRef.current));
+        if (mounted) setLoadingInvoice(false);
 
         return;
       }
 
       // If editing and no invoiceFromState then fetch from server (or local fallback)
       if (isEditing && !invoiceFromState) {
-        setLoading(true);
         try {
           const token = await obtainToken();
           const headers = { Accept: "application/json" };
@@ -475,7 +512,7 @@ export default function CreateInvoice() {
               setInvoice(
                 mergeProfileDefaults(merged, businessProfileRef.current),
               );
-              setLoading(false);
+              setLoadingInvoice(false);
               return;
             }
           }
@@ -486,7 +523,7 @@ export default function CreateInvoice() {
             err,
           );
         } finally {
-          setLoading(false);
+          if (mounted) setLoadingInvoice(false);
         }
 
         // fallback to local storage
@@ -554,19 +591,48 @@ export default function CreateInvoice() {
   }, [id, isEditing, obtainToken, generateUniqueInvoiceNumber]);
 
   /* ---------- Save invoice to backend (POST or PUT) using auth token ---------- */
-  async function handleSave({ preview = false, overrideInvoice = null } = {}) {
+  async function handleSave({
+    preview = true,
+    overrideInvoice = null,
+    _fromAi = false,
+  } = {}) {
+    if (!_fromAi && isSubmittingRef.current) return;
+
     const activeInvoice = overrideInvoice || invoice;
     if (!activeInvoice) return;
 
-    const activeItems = activeInvoice.items || [];
-    const validItems = activeItems.filter(
-      (it) => it && typeof it.description === "string" && it.description.trim().length > 0,
-    );
+    const activeItems = Array.isArray(activeInvoice.items)
+      ? activeInvoice.items
+      : [];
+
+    const validItems = activeItems
+      .filter((item) => {
+        if (!item || typeof item.description !== "string") return false;
+        const quantity = Number(item.qty ?? item.quantity);
+        const unitPrice = Number(item.unitPrice ?? item.price ?? item.rate);
+
+        return (
+          item.description.trim().length > 0 &&
+          Number.isFinite(quantity) &&
+          quantity > 0 &&
+          Number.isFinite(unitPrice) &&
+          unitPrice >= 0
+        );
+      })
+      .map((item) => ({
+        ...item,
+        description: item.description.trim(),
+        // Send a numeric qty to the API so it is persisted consistently.
+        qty: Number(item.qty ?? item.quantity),
+        unitPrice: Number(item.unitPrice ?? item.price ?? item.rate),
+      }));
+
     if (!validItems.length) {
-      alert("Please add at least one invoice item with a description.");
+      toast.error("Add at least one item with a description and valid quantity.");
       return;
     }
 
+    isSubmittingRef.current = true;
     setLoading(true);
 
     try {
@@ -682,18 +748,19 @@ export default function CreateInvoice() {
       saveStoredInvoices(all);
 
       if (preview) {
+        toast.success(`Invoice ${isEditing ? "updated" : "created"} successfully.`);
         setNavState(savedId, merged);
         router.push(`/app/invoices/${encodeURIComponent(savedId)}/preview`);
         return;
       }
 
-      alert(`Invoice ${isEditing ? "updated" : "created"} successfully.`);
+      toast.success(`Invoice ${isEditing ? "updated" : "created"} successfully.`);
       router.push("/app/invoices");
     } catch (err) {
       console.error("Failed to save invoice to server:", err);
 
       if (err?.isHttp || preview) {
-        alert(err?.message || "Failed to save invoice.");
+        toast.error(err?.message || "Failed to save invoice.");
         return;
       }
 
@@ -722,18 +789,19 @@ export default function CreateInvoice() {
           all.unshift(preparedLocal);
         }
         saveStoredInvoices(all);
-        alert("Saved locally as fallback (network offline).");
+        toast.info("Saved locally as fallback (network offline).");
         router.push("/app/invoices");
       } catch (localErr) {
         console.error("Local fallback failed:", localErr);
-        alert(err?.message || "Save failed. See console.");
+        toast.error(err?.message || "Save failed. See console.");
       }
     } finally {
+      if (!_fromAi) isSubmittingRef.current = false;
       setLoading(false);
     }
   }
 
-  function handlePreview() {
+  function handleSaveAndPreview() {
     return handleSave({ preview: true });
   }
 
@@ -746,10 +814,21 @@ export default function CreateInvoice() {
 
   function handleApplyBusinessProfile() {
     if (!businessProfile) {
-      alert("No saved business profile found. Configure one in Business Profile first.");
+      toast.error("No saved business profile found. Configure one in Business Profiles first.");
       return;
     }
     setInvoice((prev) => mergeProfileDefaults(prev, businessProfile, { force: true }));
+    toast.success(`Applied "${businessProfile.businessName}" defaults.`);
+  }
+
+  function handleSelectBusinessProfile(profileId) {
+    setSelectedProfileId(profileId);
+    const picked = businessProfiles.find((p) => p._id === profileId);
+    if (!picked) return;
+    businessProfileRef.current = picked;
+    setBusinessProfile(picked);
+    setInvoice((prev) => mergeProfileDefaults(prev, picked, { force: true }));
+    toast.success(`Switched sender profile to "${picked.businessName}".`);
   }
 
   function mergeAiDataIntoInvoice(baseInvoice, aiData) {
@@ -810,20 +889,8 @@ export default function CreateInvoice() {
     };
   }
 
-  async function handleGenerateWithAI(rawText, userDataPayload = null) {
-    const token = await obtainToken();
-    const aiData = await generateInvoiceWithAI({
-      token,
-      prompt: rawText,
-      userData: userDataPayload || invoice,
-    });
-
-    setInvoice((prev) => mergeAiDataIntoInvoice(prev, aiData));
-    setAiOpen(false);
-  }
-
   async function handleEnhanceAndCreateWithAI() {
-    if (!invoice) return;
+    if (isSubmittingRef.current || !invoice) return;
 
     const validItems = (items || []).filter(
       (it) => it && typeof it.description === "string" && it.description.trim().length > 0,
@@ -831,10 +898,11 @@ export default function CreateInvoice() {
     if (!validItems.length) {
       const msg = "Please add at least one invoice item with a description before generating with AI.";
       setAiEnhanceError(msg);
-      alert(msg);
+      toast.error(msg);
       return;
     }
 
+    isSubmittingRef.current = true;
     setAiEnhanceError("");
     setAiEnhancing(true);
 
@@ -852,16 +920,27 @@ export default function CreateInvoice() {
         items: validItems,
       };
       setInvoice(enhancedInvoice);
-      await handleSave({ preview: true, overrideInvoice: enhancedInvoice });
+      await handleSave({
+        preview: true,
+        overrideInvoice: enhancedInvoice,
+        _fromAi: true,
+      });
     } catch (err) {
       console.error("Generate with AI failed:", err);
-      setAiEnhanceError(err?.message || "Failed to generate invoice with AI.");
+      const errMsg = err?.message || "Failed to generate invoice with AI.";
+      setAiEnhanceError(errMsg);
+      toast.error(errMsg);
     } finally {
+      isSubmittingRef.current = false;
       setAiEnhancing(false);
     }
   }
 
   const totals = computeTotals(items, invoice?.taxPercent ?? 0);
+
+  if (loadingInvoice) {
+    return <InvoicePreviewSkeleton />;
+  }
 
   /* ---------- JSX (kept structure, invoiceNumber input prefills generated value) ---------- */
   return (
@@ -882,34 +961,16 @@ export default function CreateInvoice() {
         <div className={createInvoiceStyles.headerButtonContainer}>
           <button
             type="button"
-            onClick={() => setAiOpen(true)}
-            disabled={loading || aiEnhancing}
-            className={invoicesStyles.aiButton}
-          >
-            <GeminiIcon className="w-5 h-5 flex-none" />
-            Fill with AI
-          </button>
-          <button
-            type="button"
-            onClick={() => handlePreview()}
-            disabled={loading || aiEnhancing}
-            className={createInvoiceStyles.previewButton}
-          >
-            <PreviewIcon className="w-4 h-4" />
-            {loading ? "Saving..." : "Preview"}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSave()}
+            onClick={handleSaveAndPreview}
             disabled={loading || aiEnhancing}
             className={createInvoiceStyles.saveButton}
           >
-            <SaveIcon className="w-4 h-4" />
-            {loading
-              ? "Saving..."
-              : isEditing
-                ? "Update Invoice"
-                : "Create Invoice"}
+            {loading && !aiEnhancing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <SaveIcon className="w-4 h-4" />
+            )}
+            {loading && !aiEnhancing ? "Saving..." : "Save & Preview"}
           </button>
         </div>
       </div>
@@ -1081,15 +1142,32 @@ export default function CreateInvoice() {
                 </div>
                 <h3 className={createInvoiceStyles.cardTitle}>Bill From</h3>
               </div>
-              {businessProfile && (
-                <button
-                  type="button"
-                  onClick={handleApplyBusinessProfile}
-                  className="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
-                >
-                  Apply Profile Defaults
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {businessProfiles.length > 0 && (
+                  <select
+                    aria-label="Select business profile"
+                    value={selectedProfileId}
+                    onChange={(e) => handleSelectBusinessProfile(e.target.value)}
+                    className="text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {businessProfiles.map((profile) => (
+                      <option key={profile._id} value={profile._id}>
+                        {profile.businessName}
+                        {profile.isDefault ? " (Active)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {businessProfile && (
+                  <button
+                    type="button"
+                    onClick={handleApplyBusinessProfile}
+                    className="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors cursor-pointer"
+                  >
+                    Apply Profile
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className={createInvoiceStyles.gridCols2}>
@@ -1273,8 +1351,14 @@ export default function CreateInvoice() {
                         id={`desc-${idx}`}
                         className={createInvoiceStyles.itemsInput}
                         value={it?.description ?? ""}
+                        onFocus={(e) =>
+                          handleItemFocus(idx, "description", e.target.value)
+                        }
                         onChange={(e) =>
                           updateItem(idx, "description", e.target.value)
+                        }
+                        onBlur={(e) =>
+                          handleItemBlur(idx, "description", e.target.value)
                         }
                         placeholder="Item name"
                         title={it?.description ?? ""}
@@ -1299,7 +1383,13 @@ export default function CreateInvoice() {
                         step="1"
                         className={createInvoiceStyles.itemsNumberInput}
                         value={it?.qty ?? ""}
+                        onFocus={(e) =>
+                          handleItemFocus(idx, "qty", e.target.value)
+                        }
                         onChange={(e) => updateItem(idx, "qty", e.target.value)}
+                        onBlur={(e) =>
+                          handleItemBlur(idx, "qty", e.target.value)
+                        }
                         placeholder="Quantity"
                         aria-label={`Item ${idx + 1} quantity`}
                       />
@@ -1322,8 +1412,14 @@ export default function CreateInvoice() {
                         step="0.01"
                         className={createInvoiceStyles.itemsNumberInput}
                         value={it?.unitPrice ?? ""}
+                        onFocus={(e) =>
+                          handleItemFocus(idx, "unitPrice", e.target.value)
+                        }
                         onChange={(e) =>
                           updateItem(idx, "unitPrice", e.target.value)
+                        }
+                        onBlur={(e) =>
+                          handleItemBlur(idx, "unitPrice", e.target.value)
                         }
                         placeholder="Unit Price"
                         aria-label={`Item ${idx + 1} unit price`}
@@ -1779,14 +1875,6 @@ export default function CreateInvoice() {
           </div>
         )}
       </div>
-
-      <AiInvoiceModal
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
-        onGenerate={handleGenerateWithAI}
-        initialText=""
-        initialUserData={invoice}
-      />
     </div>
   );
 }
